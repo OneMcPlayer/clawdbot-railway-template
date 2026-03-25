@@ -297,7 +297,7 @@ function requireSetupAuth(req, res, next) {
 
 const app = express();
 app.disable("x-powered-by");
-app.use(express.json({ limit: "1mb" }));
+app.use("/setup/api", express.json({ limit: "1mb" }));
 
 // Minimal health endpoint for Railway.
 app.get("/setup/healthz", (_req, res) => res.json({ ok: true }));
@@ -532,7 +532,6 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 
 const AUTH_GROUPS = [
   { value: "openai", label: "OpenAI", hint: "Codex OAuth + API key", options: [
-    { value: "codex-cli", label: "OpenAI Codex OAuth (Codex CLI)" },
     { value: "openai-codex", label: "OpenAI Codex (ChatGPT OAuth)" },
     { value: "openai-api-key", label: "OpenAI API key" }
   ]},
@@ -578,6 +577,28 @@ const AUTH_GROUPS = [
   ]}
 ];
 
+function normalizeAuthChoice(choice) {
+  // Backward-compat for stale setup UIs that still submit the old value.
+  if (!choice) return choice;
+  if (choice === "codex-cli") return "openai-codex";
+  return choice;
+}
+
+// OAuth flows require interactive mode in the CLI.
+const INTERACTIVE_OAUTH_CHOICES = new Set([
+  "openai-codex",
+  "claude-cli",
+  "google-antigravity",
+  "google-gemini-cli",
+  "qwen-portal",
+  "github-copilot",
+  "copilot-proxy",
+]);
+
+function isInteractiveOAuthChoice(choice) {
+  return INTERACTIVE_OAUTH_CHOICES.has(choice);
+}
+
 app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
   const channelsHelp = await runCmd(OPENCLAW_NODE, clawArgs(["channels", "add", "--help"]));
@@ -596,9 +617,9 @@ app.get("/setup/api/auth-groups", requireSetupAuth, (_req, res) => {
 });
 
 function buildOnboardArgs(payload) {
+  const authChoice = normalizeAuthChoice(payload.authChoice);
   const args = [
     "onboard",
-    "--non-interactive",
     "--accept-risk",
     "--json",
     "--no-install-daemon",
@@ -618,8 +639,12 @@ function buildOnboardArgs(payload) {
     payload.flow || "quickstart",
   ];
 
-  if (payload.authChoice) {
-    args.push("--auth-choice", payload.authChoice);
+  if (!isInteractiveOAuthChoice(authChoice)) {
+    args.push("--non-interactive");
+  }
+
+  if (authChoice) {
+    args.push("--auth-choice", authChoice);
 
     // Map secret to correct flag for common choices.
     const secret = (payload.authSecret || "").trim();
@@ -638,20 +663,20 @@ function buildOnboardArgs(payload) {
       "opencode-zen": "--opencode-zen-api-key",
     };
 
-    const flag = map[payload.authChoice];
+    const flag = map[authChoice];
 
     // If the user picked an API-key auth choice but didn't provide a secret, fail fast.
     // Otherwise OpenClaw may fall back to its default auth choice, which looks like the
     // wizard "reverted" their selection.
     if (flag && !secret) {
-      throw new Error(`Missing auth secret for authChoice=${payload.authChoice}`);
+      throw new Error(`Missing auth secret for authChoice=${authChoice}`);
     }
 
     if (flag) {
       args.push(flag, secret);
     }
 
-    if (payload.authChoice === "token") {
+    if (authChoice === "token") {
       // This is the Anthropic setup-token flow.
       if (!secret) throw new Error("Missing auth secret for authChoice=token");
       args.push("--token-provider", "anthropic", "--token", secret);
